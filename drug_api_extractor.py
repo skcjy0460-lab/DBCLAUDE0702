@@ -285,16 +285,26 @@ def call_api(base_url: str, operation: str, params: dict, timeout: int = 15):
 
 
 def fetch_all_pages(base_url, operation, service_key, extra_params, num_rows=100,
-                     max_pages=500, sleep_sec=0.15, progress_cb=None):
+                     max_pages=500, sleep_sec=0.15, progress_cb=None,
+                     start_index=None, end_index=None):
     """
-    totalCount를 확인하면서 pageNo를 계속 증가시켜 전체 데이터를 수집한다.
+    totalCount를 확인하면서 pageNo를 계속 증가시켜 데이터를 수집한다.
     progress_cb(cur_page, total_pages, collected_count) 형태의 콜백을 넘기면
     Streamlit 진행률 표시에 사용할 수 있다.
+
+    start_index / end_index : 1부터 시작하는 전역 순번(1-based, 양끝 포함) 범위.
+      지정하면 전체가 아니라 해당 구간만 수집한다.
+      예) start_index=10001, end_index=20000 → 10,001번째~20,000번째 데이터만 수집.
+      대량 데이터(수만 건)를 한 번에 처리하면 서버 타임아웃/메모리 문제가 생길 수 있어
+      1만 건 단위 등으로 나눠 여러 번 실행할 때 사용한다.
     """
     all_items = []
-    page = 1
     total_count = None
     errors = []
+
+    start_page = ((start_index - 1) // num_rows + 1) if start_index and start_index > 1 else 1
+    page = start_page
+    pages_fetched = 0
 
     while True:
         params = build_params(service_key, num_rows, page, extra_params)
@@ -309,20 +319,39 @@ def fetch_all_pages(base_url, operation, service_key, extra_params, num_rows=100
         if total_count is None:
             total_count = total
 
-        all_items.extend(items)
+        page_start_idx = (page - 1) * num_rows + 1
+        page_end_idx = page_start_idx + len(items) - 1
+
+        page_items = items
+        if start_index or end_index:
+            lo = start_index or 1
+            hi = end_index if end_index else float("inf")
+            page_items = [
+                it for offset, it in enumerate(items)
+                if lo <= (page_start_idx + offset) <= hi
+            ]
+
+        all_items.extend(page_items)
+        pages_fetched += 1
 
         if progress_cb:
-            total_pages_est = max(1, -(-max(total_count or 0, 1) // num_rows))
-            progress_cb(page, total_pages_est, len(all_items))
+            if end_index:
+                total_target = end_index - (start_index or 1) + 1
+                total_pages_est = max(1, -(-total_target // num_rows))
+            else:
+                total_pages_est = max(1, -(-max(total_count or 0, 1) // num_rows))
+            progress_cb(pages_fetched, total_pages_est, len(all_items))
 
-        page += 1
         time.sleep(sleep_sec)
 
-        if not items:
+        no_more_data = not items
+        reached_end_index = bool(end_index) and page_end_idx >= end_index
+        reached_total = bool(total_count) and page_end_idx >= total_count
+        page += 1
+
+        if no_more_data or reached_end_index or reached_total:
             break
-        if total_count and len(all_items) >= total_count:
-            break
-        if page > max_pages:
+        if pages_fetched >= max_pages:
             errors.append(f"안전장치 작동: max_pages({max_pages}) 도달, 수집을 중단합니다.")
             break
 
@@ -460,9 +489,32 @@ with tab_bulk:
             date_field, date_label = cfg["date_param"]
             date_value = st.text_input(f"{date_label}", key="bulk_date_value")
 
+    st.markdown(
+        "**🔢 대량 데이터 분할 수집** — 데이터가 2~3만 건 이상으로 많으면 한 번에 다 수집하다가 "
+        "서버 타임아웃/메모리 문제로 실패할 수 있습니다. 아래에서 구간을 나눠(예: 1~10000, "
+        "10001~20000 …) 여러 번 실행하면, 결과가 자동으로 이어붙여져서 마지막에 전체를 "
+        "한 번에 다운로드할 수 있습니다."
+    )
+    use_range = st.checkbox("범위를 지정해서 수집하기", key="bulk_use_range")
+    start_idx_input, end_idx_input = None, None
+    if use_range:
+        rcol1, rcol2 = st.columns(2)
+        with rcol1:
+            start_idx_input = st.number_input(
+                "시작 번호", min_value=1, value=1, step=10000, key="bulk_start_idx",
+                help="1부터 시작하는 순번입니다. 예: 첫 구간은 1",
+            )
+        with rcol2:
+            end_idx_input = st.number_input(
+                "종료 번호", min_value=1, value=10000, step=10000, key="bulk_end_idx",
+                help="이 번호까지 포함해서 수집합니다. 예: 첫 구간은 10000, 다음 구간은 10001~20000",
+            )
+        if end_idx_input < start_idx_input:
+            st.error("종료 번호가 시작 번호보다 작습니다. 값을 확인해주세요.")
+
     est_col1, est_col2 = st.columns([1, 1])
     with est_col1:
-        run_bulk = st.button("🚀 전체 수집 시작", type="primary", use_container_width=True, key="btn_bulk")
+        run_bulk = st.button("🚀 수집 시작", type="primary", use_container_width=True, key="btn_bulk")
     with est_col2:
         st.caption("대량 수집은 데이터 건수에 따라 수 분 걸릴 수 있습니다.")
 
@@ -487,6 +539,8 @@ with tab_bulk:
                 cfg["base_url"], cfg["operation"], service_key, extra,
                 num_rows=int(num_rows), max_pages=int(max_pages),
                 sleep_sec=float(sleep_sec), progress_cb=progress_cb,
+                start_index=int(start_idx_input) if use_range else None,
+                end_index=int(end_idx_input) if use_range else None,
             )
             progress_bar.progress(1.0, text="수집 완료")
 
@@ -500,13 +554,36 @@ with tab_bulk:
             else:
                 df = pd.DataFrame(items)
                 df_display = rename_columns(df, cfg["fields_of_interest"])
-                st.success(f"총 {total_count:,}건 중 {len(df_display):,}건 수집 완료")
+                if use_range:
+                    st.success(
+                        f"[{int(start_idx_input):,}~{int(end_idx_input):,} 구간] "
+                        f"전체 {total_count:,}건 중 이번 구간 {len(df_display):,}건 수집 완료"
+                    )
+                else:
+                    st.success(f"총 {total_count:,}건 중 {len(df_display):,}건 수집 완료")
                 st.dataframe(df_display.head(500), use_container_width=True, hide_index=True)
                 if len(df_display) > 500:
                     st.caption(f"미리보기는 상위 500건만 표시됩니다. 전체 {len(df_display):,}건은 엑셀 다운로드로 확인하세요.")
 
                 st.session_state["bulk_last_df"] = df_display
                 st.session_state["bulk_last_source"] = cfg["label"]
+
+                # 범위 지정 모드일 때는 구간별 결과를 자동으로 이어붙여서 누적 저장
+                if use_range:
+                    acc_key = f"bulk_accum_{source_key}"
+                    prev = st.session_state.get(acc_key)
+                    if prev is not None:
+                        combined = pd.concat([prev, df_display], ignore_index=True)
+                        dedup_col = None
+                        for cand in ("품목기준코드", "ITEM_SEQ"):
+                            if cand in combined.columns:
+                                dedup_col = cand
+                                break
+                        if dedup_col:
+                            combined = combined.drop_duplicates(subset=[dedup_col])
+                        st.session_state[acc_key] = combined
+                    else:
+                        st.session_state[acc_key] = df_display
 
     # 다운로드 영역 (수집 결과가 세션에 있으면 항상 노출)
     if "bulk_last_df" in st.session_state:
@@ -515,12 +592,37 @@ with tab_bulk:
                     f"({len(st.session_state['bulk_last_df']):,}건)")
         excel_bytes = to_excel_bytes({"수집결과": st.session_state["bulk_last_df"]})
         st.download_button(
-            "⬇️ 엑셀 파일 다운로드",
+            "⬇️ 이번 구간 엑셀 다운로드",
             data=excel_bytes,
             file_name=f"{source_key}_추출결과.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
+
+    # 범위 지정 모드로 여러 구간을 나눠 수집했을 때 → 누적(전체 합본) 결과 다운로드
+    accum_key = f"bulk_accum_{source_key}"
+    if accum_key in st.session_state:
+        st.divider()
+        st.markdown(
+            f"**📚 누적 수집 결과 (지금까지 나눠서 수집한 구간을 모두 합친 데이터):** "
+            f"{len(st.session_state[accum_key]):,}건"
+        )
+        st.caption("같은 API에서 구간(1~10000, 10001~20000 …)을 나눠 여러 번 수집하면 여기에 계속 합쳐집니다.")
+        accum_bytes = to_excel_bytes({"누적결과": st.session_state[accum_key]})
+        acol1, acol2 = st.columns([3, 1])
+        with acol1:
+            st.download_button(
+                "⬇️ 누적 전체 엑셀 다운로드",
+                data=accum_bytes,
+                file_name=f"{source_key}_누적전체.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"btn_download_accum_{source_key}",
+            )
+        with acol2:
+            if st.button("초기화", key=f"btn_reset_accum_{source_key}", use_container_width=True):
+                del st.session_state[accum_key]
+                st.rerun()
 
     st.divider()
     st.subheader("🔗 여러 API 결과를 품목기준코드로 병합해서 하나의 DB 원본표 만들기")
