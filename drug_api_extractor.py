@@ -256,8 +256,15 @@ def call_api(base_url: str, operation: str, params: dict, timeout: int = 15):
         return [], 0, f"알 수 없는 응답 형식 (status={status}): {text[:200]}", status
 
     try:
-        body = data["response"]["body"]
-        header = data["response"]["header"]
+        # 일부 API(예: DrugPrdtPrmsnInfoService07)는 "response" 겉껍질 없이
+        # {"header":..., "body":...}를 최상위로 바로 내려준다. 두 구조 모두 지원.
+        if "response" in data and isinstance(data["response"], dict):
+            root_obj = data["response"]
+        else:
+            root_obj = data
+
+        body = root_obj["body"]
+        header = root_obj["header"]
         result_code = str(header.get("resultCode", ""))
         result_msg = header.get("resultMsg", "")
         total_count = int(body.get("totalCount", 0) or 0)
