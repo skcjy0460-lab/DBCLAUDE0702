@@ -17,7 +17,8 @@ ClaimLens 부속 도구 - 공공데이터포털 의약품 API 통합 추출기
   B. 식품의약품안전처_의약품 제품 허가정보서비스
      base : http://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07
      오퍼레이션(목록) : getDrugPrdtPrmsnInq07 ← 확정
-     오퍼레이션(상세/효능효과·용법용량·주의사항) : getDrugPrdtPrmsnDtlInq07 (예상값)
+     오퍼레이션(상세/효능효과·용법용량·주의사항) : getDrugPrdtPrmsnDtlInq06 ← 확정 (주의: 버전번호가 06으로 목록조회의 07과 다름)
+     오퍼레이션(주성분 상세) : getDrugPrdtMcpnDtlInq07 ← 확정
   C. 식품의약품안전처_DUR품목정보서비스 (병용금기/임부금기/연령금기/노인주의 등)
      base : http://apis.data.go.kr/1471000/DURPrdlstInfoService
      오퍼레이션(병용금기) : getUsjntTabooInfoList ← 확정
@@ -88,8 +89,8 @@ API_CONFIG = {
     "mfds_permit_detail": {
         "label": "③ 식약처 의약품 상세정보 (효능효과/용법용량/사용상주의사항)",
         "base_url": "http://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07",
-        "operation": "getDrugPrdtPrmsnDtlInq07",
-        "confirmed": False,  # ← 마이페이지에서 반드시 재확인 권장
+        "operation": "getDrugPrdtPrmsnDtlInq06",  # 조정윤님 마이페이지 Swagger에서 확인됨 (목록조회와 버전번호가 다름: 06)
+        "confirmed": True,  # ← 2026-07-02 사용자 계정 Swagger 화면으로 확인 완료
         "search_param_candidates": ["item_seq", "item_name"],
         "date_param": None,
         "fields_of_interest": {
@@ -98,6 +99,22 @@ API_CONFIG = {
             "EE_DOC_DATA": "효능효과",
             "UD_DOC_DATA": "용법용량",
             "NB_DOC_DATA": "사용상주의사항",
+        },
+    },
+    "mfds_permit_ingredient_detail": {
+        "label": "③-보조 식약처 의약품 주성분 상세정보",
+        "base_url": "http://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07",
+        "operation": "getDrugPrdtMcpnDtlInq07",  # 조정윤님 마이페이지 Swagger에서 확인됨
+        "confirmed": True,
+        "search_param_candidates": ["item_seq", "item_name"],
+        "date_param": None,
+        "fields_of_interest": {
+            "ITEM_SEQ": "품목기준코드",
+            "ITEM_NAME": "제품명",
+            "MATERIAL_NAME": "주성분명",
+            "MAIN_INGR_ENG": "주성분 영문명",
+            "TOTAL_CONTENT": "함량",
+            "UNIT": "단위",
         },
     },
     "dur_taboo": {
