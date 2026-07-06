@@ -33,7 +33,72 @@ import streamlit as st
 st.set_page_config(page_title="효능효과/용법용량 일괄채우기", page_icon="🧩", layout="wide")
 
 DETAIL_BASE_URL = "http://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07"
-DETAIL_OPERATION = "getDrugPrdtPrmsnDtlInq06"  # drug_api_extractor.py와 동일 (확정된 오퍼레이션)
+DETAIL_OPERATION = "getDrugPrdtPrmsnDtlInq06"  # ③ 상세조회 (drug_api_extractor.py와 동일, 확정된 오퍼레이션)
+LIST_OPERATION = "getDrugPrdtPrmsnInq07"  # ② 허가정보 목록조회 (제품명 -> 진짜 ITEM_SEQ 찾기용)
+
+
+def resolve_item_seq(service_key: str, item_name: str, timeout: int = 15):
+    """제품명으로 ② 허가정보 목록조회를 호출해서 식약처 진짜 ITEM_SEQ를 찾는다.
+    Master 파일의 코드 컬럼이 식약처 ITEM_SEQ가 아닌 다른 코드체계(예: 심평원 계열)일 때 필수 단계."""
+    url = f"{DETAIL_BASE_URL}/{LIST_OPERATION}"
+    params = {
+        "serviceKey": service_key,
+        "item_name": item_name,
+        "numOfRows": 10,
+        "pageNo": 1,
+        "type": "json",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        return [], f"네트워크 오류: {e}"
+
+    text = resp.text.strip()
+    if text.startswith("<"):
+        return [], f"XML 응답(에러 가능성): {text[:200]}"
+    try:
+        data = resp.json()
+    except ValueError:
+        return [], f"알 수 없는 응답: {text[:200]}"
+
+    try:
+        root_obj = data["response"] if "response" in data and isinstance(data["response"], dict) else data
+        body = root_obj["body"]
+        header = root_obj["header"]
+        result_code = str(header.get("resultCode", ""))
+        if result_code not in ("00", "0"):
+            return [], f"[{result_code}] {header.get('resultMsg', '')}"
+        items_raw = body.get("items", "")
+        if items_raw in ("", None):
+            return [], "검색 결과 없음"
+        if isinstance(items_raw, dict) and "item" in items_raw:
+            item_val = items_raw["item"]
+            items = item_val if isinstance(item_val, list) else [item_val]
+        elif isinstance(items_raw, list):
+            items = items_raw
+        else:
+            return [], "예상치 못한 items 구조"
+        return items, None
+    except (KeyError, TypeError):
+        return [], f"예상치 못한 JSON 구조: {str(data)[:300]}"
+
+
+def pick_best_match(candidates: list, target_name: str, target_content: str = ""):
+    """후보 목록 중 제품명(+함량)이 가장 근접한 것을 고른다."""
+    if not candidates:
+        return None
+    target_name_norm = re.sub(r"\s+", "", target_name or "")
+    exact = [c for c in candidates if re.sub(r"\s+", "", c.get("ITEM_NAME", "")) == target_name_norm]
+    if exact:
+        pool = exact
+    else:
+        pool = candidates
+    if target_content:
+        content_norm = re.sub(r"\s+", "", str(target_content))
+        for c in pool:
+            if content_norm and content_norm in re.sub(r"\s+", "", str(c.get("ITEM_NAME", ""))):
+                return c
+    return pool[0]
 
 TAG_RE = re.compile(r"<[^>]+>")
 
@@ -151,13 +216,41 @@ st.caption("Master 엑셀 업로드 → 빈 칸인 품목만 골라 ITEM_SEQ로 
 # ============================================================
 with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 (문제 진단용)", expanded=True):
     st.caption(
-        "실패가 반복되면 먼저 여기서 코드 1개를 넣고 원본 응답(raw JSON)을 확인하세요. "
-        "잘 알려진 약의 품목기준코드를 모르면, 아래에 Master 파일에서 실패했던 코드를 그대로 넣어 테스트해도 됩니다."
+        "Master 파일의 코드가 식약처 ITEM_SEQ가 아닐 수 있다는 게 확인되어, "
+        "이제는 '제품명으로 진짜 ITEM_SEQ 찾기'를 먼저 테스트하는 걸 권장합니다."
     )
-    test_item_seq = st.text_input("테스트할 품목기준코드(ITEM_SEQ)", key="debug_item_seq")
-    test_run = st.button("이 코드로 테스트 호출", disabled=not service_key)
+    test_item_name = st.text_input("테스트할 제품명 (예: 포크랄시럽(포수클로랄))", key="debug_item_name")
+    test_name_run = st.button("제품명으로 진짜 ITEM_SEQ 찾기", disabled=not service_key)
     if not service_key:
         st.warning("사이드바에 서비스키를 먼저 입력해주세요.")
+    if test_name_run and test_item_name.strip():
+        candidates, err = resolve_item_seq(service_key, test_item_name.strip())
+        if err:
+            st.error(f"목록조회 실패: {err}")
+        elif not candidates:
+            st.warning("검색 결과가 없습니다. 제품명 일부만 넣어보세요 (예: 괄호 안 성분명 빼고).")
+        else:
+            st.success(f"{len(candidates)}건 발견")
+            show_cols = [c for c in ["ITEM_SEQ", "ITEM_NAME", "ENTP_NAME", "ITEM_PERMIT_DATE"] if c in candidates[0]]
+            st.dataframe(pd.DataFrame(candidates)[show_cols] if show_cols else pd.DataFrame(candidates))
+
+            best = pick_best_match(candidates, test_item_name.strip())
+            if best:
+                real_seq = best.get("ITEM_SEQ")
+                st.info(f"가장 유력한 진짜 ITEM_SEQ: **{real_seq}** — 아래에서 바로 상세조회 테스트")
+                if st.button(f"이 ITEM_SEQ({real_seq})로 상세조회 테스트"):
+                    result, derr, raw_text, req_url = call_detail_api(service_key, real_seq, return_raw=True)
+                    if result:
+                        st.success("성공! 효능효과/용법용량이 반환되었습니다.")
+                        st.json(result)
+                    else:
+                        st.error(f"실패: {derr}")
+                    st.code(raw_text[:2000] if raw_text else "(응답 본문 없음)")
+
+    st.divider()
+    st.caption("코드값 자체를 직접 넣어 테스트하고 싶으면 아래를 사용하세요.")
+    test_item_seq = st.text_input("테스트할 품목기준코드(ITEM_SEQ)", key="debug_item_seq")
+    test_run = st.button("이 코드로 테스트 호출", disabled=not service_key)
     if test_run and test_item_seq.strip():
         result, err, raw_text, req_url = call_detail_api(
             service_key, test_item_seq.strip(), return_raw=True
@@ -177,15 +270,16 @@ st.divider()
 # ============================================================
 # 1) Master 엑셀 업로드
 # ============================================================
-master_file = st.file_uploader("Master 엑셀 업로드 (품목기준코드/약품코드, 성분명, 함량, 제형, 효능효과, 용법용량 컬럼 필요)", type=["xlsx"])
+master_file = st.file_uploader("Master 엑셀 업로드 (제품명, 품목기준코드/약품코드, 성분명, 함량, 제형, 효능효과, 용법용량 컬럼 필요)", type=["xlsx"])
 
 if master_file:
     df = pd.read_excel(master_file, sheet_name=0)
     st.write(f"전체 {len(df):,}행 로드 완료")
 
+    name_col = "제품명" if "제품명" in df.columns else None
     code_col = "약품코드" if "약품코드" in df.columns else ("품목기준코드" if "품목기준코드" in df.columns else None)
-    if code_col is None:
-        st.error("품목기준코드(또는 약품코드) 컬럼을 찾을 수 없습니다.")
+    if name_col is None:
+        st.error("제품명 컬럼을 찾을 수 없습니다. (코드값 불일치가 확인되어 제품명으로 재조회하는 방식이 필요합니다)")
         st.stop()
 
     missing_mask = df["효능효과"].isna() & df["용법용량"].isna() if "효능효과" in df.columns else df.index >= 0
@@ -194,9 +288,15 @@ if master_file:
 
     chunk_df = missing_df.iloc[int(start_idx):int(end_idx)]
     st.write(f"이번 청크에서 조회할 품목: {len(chunk_df):,}건 (인덱스 {start_idx}~{end_idx})")
+    st.caption(
+        "⚠️ 이 방식은 품목당 API를 최대 2번(① 제품명→ITEM_SEQ 검색, ② 상세조회) 호출합니다. "
+        "속도가 기존보다 2배 느려지니, 청크 크기를 기존의 절반 정도로 잡는 걸 권장합니다."
+    )
 
     if "filled_results" not in st.session_state:
-        st.session_state["filled_results"] = {}  # 품목기준코드 -> dict
+        st.session_state["filled_results"] = {}  # 품목기준코드(원본 Master 기준) -> dict
+    if "name_seq_cache" not in st.session_state:
+        st.session_state["name_seq_cache"] = {}  # 제품명 -> 진짜 ITEM_SEQ (중복 검색 방지)
 
     run = st.button("🚀 이 범위 수집 시작", type="primary", disabled=not service_key)
     if not service_key:
@@ -208,12 +308,34 @@ if master_file:
         errors = []
         n = len(chunk_df)
         for i, (_, row) in enumerate(chunk_df.iterrows()):
-            item_seq = str(row[code_col]).strip()
-            result, err = call_detail_api(service_key, item_seq)
+            orig_code = str(row[code_col]).strip() if code_col else str(i)
+            item_name = str(row[name_col]).strip()
+            content_hint = str(row["함량"]).strip() if "함량" in df.columns and pd.notna(row.get("함량")) else ""
+
+            real_seq = st.session_state["name_seq_cache"].get(item_name)
+            if real_seq is None:
+                candidates, list_err = resolve_item_seq(service_key, item_name)
+                if list_err or not candidates:
+                    errors.append(f"{item_name}: 목록조회 실패/결과없음 ({list_err})")
+                    progress.progress((i + 1) / max(n, 1))
+                    time.sleep(sleep_sec)
+                    continue
+                best = pick_best_match(candidates, item_name, content_hint)
+                real_seq = best.get("ITEM_SEQ") if best else None
+                st.session_state["name_seq_cache"][item_name] = real_seq
+
+            if not real_seq:
+                errors.append(f"{item_name}: 진짜 ITEM_SEQ를 못 찾음")
+                progress.progress((i + 1) / max(n, 1))
+                time.sleep(sleep_sec)
+                continue
+
+            result, err = call_detail_api(service_key, real_seq)
             if result:
-                st.session_state["filled_results"][item_seq] = result
+                result["원본코드"] = orig_code
+                st.session_state["filled_results"][orig_code] = result
             else:
-                errors.append(f"{item_seq}: {err}")
+                errors.append(f"{item_name}({real_seq}): {err}")
             progress.progress((i + 1) / max(n, 1))
             status.text(f"{i+1}/{n} 처리 중... (누적 성공 {len(st.session_state['filled_results']):,}건)")
             time.sleep(sleep_sec)
@@ -233,11 +355,16 @@ if master_file:
 
         result_df = pd.DataFrame(st.session_state["filled_results"].values())
         merged = df.copy()
-        merged[code_col] = merged[code_col].astype(str).str.strip()
-        result_df["품목기준코드"] = result_df["품목기준코드"].astype(str).str.strip()
+        if code_col:
+            merged[code_col] = merged[code_col].astype(str).str.strip()
+        else:
+            merged["_원본코드_임시"] = merged.index.astype(str)
+            code_col = "_원본코드_임시"
+        result_df["원본코드"] = result_df["원본코드"].astype(str).str.strip()
+        result_df = result_df.rename(columns={"품목기준코드": "식약처_진짜ITEM_SEQ"})
 
         merged = merged.merge(
-            result_df, left_on=code_col, right_on="품목기준코드", how="left", suffixes=("", "_신규")
+            result_df, left_on=code_col, right_on="원본코드", how="left", suffixes=("", "_신규")
         )
 
         if "효능효과_신규" in merged.columns:
