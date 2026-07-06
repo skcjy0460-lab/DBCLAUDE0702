@@ -56,9 +56,10 @@ def normalize_service_key(raw_key: str, key_mode: str) -> str:
     return raw_key
 
 
-def call_detail_api(service_key: str, item_seq: str, timeout: int = 15):
+def call_detail_api(service_key: str, item_seq: str, timeout: int = 15, return_raw: bool = False):
     """ITEM_SEQ 1건에 대해 상세조회 API 호출. drug_api_extractor.py의 call_api와
-    동일한 파싱 규칙(response 래핑 유무 모두 지원)을 사용."""
+    동일한 파싱 규칙(response 래핑 유무 모두 지원)을 사용.
+    return_raw=True면 (result, err, raw_text, request_url)을 반환 (디버그용)."""
     url = f"{DETAIL_BASE_URL}/{DETAIL_OPERATION}"
     params = {
         "serviceKey": service_key,
@@ -67,19 +68,25 @@ def call_detail_api(service_key: str, item_seq: str, timeout: int = 15):
         "pageNo": 1,
         "type": "json",
     }
+
+    def _wrap(result, err, raw_text="", req=None):
+        if return_raw:
+            return result, err, raw_text, (req.url if req is not None else url)
+        return result, err
+
     try:
         resp = requests.get(url, params=params, timeout=timeout)
     except requests.exceptions.RequestException as e:
-        return None, f"네트워크 오류: {e}"
+        return _wrap(None, f"네트워크 오류: {e}")
 
     text = resp.text.strip()
     if text.startswith("<"):
-        return None, f"XML 응답(에러 가능성): {text[:200]}"
+        return _wrap(None, f"XML 응답(에러 가능성): {text[:300]}", text, resp)
 
     try:
         data = resp.json()
     except ValueError:
-        return None, f"알 수 없는 응답: {text[:200]}"
+        return _wrap(None, f"알 수 없는 응답: {text[:300]}", text, resp)
 
     try:
         root_obj = data["response"] if "response" in data and isinstance(data["response"], dict) else data
@@ -87,27 +94,28 @@ def call_detail_api(service_key: str, item_seq: str, timeout: int = 15):
         header = root_obj["header"]
         result_code = str(header.get("resultCode", ""))
         if result_code not in ("00", "0"):
-            return None, f"[{result_code}] {header.get('resultMsg', '')}"
+            return _wrap(None, f"[{result_code}] {header.get('resultMsg', '')}", text, resp)
 
         items_raw = body.get("items", "")
         if items_raw in ("", None):
-            return None, "결과 없음 (해당 품목 상세문서 미등록)"
+            return _wrap(None, "결과 없음 (해당 품목 상세문서 미등록)", text, resp)
         if isinstance(items_raw, dict) and "item" in items_raw:
             item_val = items_raw["item"]
             item = item_val[0] if isinstance(item_val, list) else item_val
         elif isinstance(items_raw, list):
             item = items_raw[0]
         else:
-            return None, "예상치 못한 items 구조"
+            return _wrap(None, "예상치 못한 items 구조", text, resp)
 
-        return {
+        result = {
             "품목기준코드": str(item.get("ITEM_SEQ", item_seq)),
             "효능효과": strip_html(item.get("EE_DOC_DATA", "")),
             "용법용량": strip_html(item.get("UD_DOC_DATA", "")),
             "사용상주의사항_API": strip_html(item.get("NB_DOC_DATA", "")),
-        }, None
+        }
+        return _wrap(result, None, text, resp)
     except (KeyError, TypeError):
-        return None, f"예상치 못한 JSON 구조: {str(data)[:300]}"
+        return _wrap(None, f"예상치 못한 JSON 구조: {str(data)[:400]}", text, resp)
 
 
 # ============================================================
@@ -137,6 +145,34 @@ with st.sidebar:
 
 st.title("🧩 효능효과/용법용량 ITEM_SEQ 일괄채우기")
 st.caption("Master 엑셀 업로드 → 빈 칸인 품목만 골라 ITEM_SEQ로 하나씩 조회 → 누적 병합")
+
+# ============================================================
+# 0) 단일 코드 테스트 (디버그용) - 대량 수집 전에 먼저 이걸로 확인 권장
+# ============================================================
+with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 (문제 진단용)", expanded=True):
+    st.caption(
+        "실패가 반복되면 먼저 여기서 코드 1개를 넣고 원본 응답(raw JSON)을 확인하세요. "
+        "잘 알려진 약의 품목기준코드를 모르면, 아래에 Master 파일에서 실패했던 코드를 그대로 넣어 테스트해도 됩니다."
+    )
+    test_item_seq = st.text_input("테스트할 품목기준코드(ITEM_SEQ)", key="debug_item_seq")
+    test_run = st.button("이 코드로 테스트 호출", disabled=not service_key)
+    if not service_key:
+        st.warning("사이드바에 서비스키를 먼저 입력해주세요.")
+    if test_run and test_item_seq.strip():
+        result, err, raw_text, req_url = call_detail_api(
+            service_key, test_item_seq.strip(), return_raw=True
+        )
+        st.write("**요청 URL(서비스키 마스킹):**")
+        st.code(req_url.split("serviceKey=")[0] + "serviceKey=***" if "serviceKey=" in req_url else req_url)
+        if result:
+            st.success("성공! 아래 데이터가 반환되었습니다.")
+            st.json(result)
+        else:
+            st.error(f"실패: {err}")
+        st.write("**원본 응답(raw):**")
+        st.code(raw_text[:2000] if raw_text else "(응답 본문 없음)")
+
+st.divider()
 
 # ============================================================
 # 1) Master 엑셀 업로드
