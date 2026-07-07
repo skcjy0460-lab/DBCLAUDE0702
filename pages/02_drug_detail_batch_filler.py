@@ -83,22 +83,42 @@ def resolve_item_seq(service_key: str, item_name: str, timeout: int = 15):
         return [], f"예상치 못한 JSON 구조: {str(data)[:300]}"
 
 
+def clean_product_name(raw_name: str):
+    """Master의 약품명에서 뒤에 붙은 포장단위 표기(예: '_(9.5g/95mL)')를 떼어내고
+    (정제된 검색용 이름, 떼어낸 포장단위 힌트)를 반환한다.
+    식약처 ITEM_NAME에는 이 포장단위가 없어서, 붙인 채로 검색하면 결과가 안 나온다."""
+    if not raw_name:
+        return "", ""
+    raw_name = str(raw_name).strip()
+    m = re.match(r"^(.*?)_?\(([^)]*(?:g|mL|ml|정|캡슐|포|mg)[^)]*)\)\s*$", raw_name)
+    if m and ("g" in m.group(2) or "mL" in m.group(2) or "ml" in m.group(2)):
+        return m.group(1).strip(), m.group(2).strip()
+    return raw_name, ""
+
+
+def is_export_variant(candidate: dict) -> bool:
+    name = str(candidate.get("ITEM_NAME", "")) + str(candidate.get("ITEM_ENG_NAME", ""))
+    return ("수출" in name) or ("export" in name.lower())
+
+
 def pick_best_match(candidates: list, target_name: str, target_content: str = ""):
-    """후보 목록 중 제품명(+함량)이 가장 근접한 것을 고른다."""
+    """후보 목록 중 제품명(+함량)이 가장 근접한 것을 고른다. 수출용 변형은 후순위로 미룬다."""
     if not candidates:
         return None
+    domestic = [c for c in candidates if not is_export_variant(c)]
+    pool_all = domestic if domestic else candidates
+
     target_name_norm = re.sub(r"\s+", "", target_name or "")
-    exact = [c for c in candidates if re.sub(r"\s+", "", c.get("ITEM_NAME", "")) == target_name_norm]
-    if exact:
-        pool = exact
-    else:
-        pool = candidates
+    exact = [c for c in pool_all if re.sub(r"\s+", "", c.get("ITEM_NAME", "")) == target_name_norm]
+    pool = exact if exact else pool_all
+
     if target_content:
         content_norm = re.sub(r"\s+", "", str(target_content))
         for c in pool:
             if content_norm and content_norm in re.sub(r"\s+", "", str(c.get("ITEM_NAME", ""))):
                 return c
     return pool[0]
+
 
 TAG_RE = re.compile(r"<[^>]+>")
 
@@ -219,12 +239,15 @@ with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 
         "Master 파일의 코드가 식약처 ITEM_SEQ가 아닐 수 있다는 게 확인되어, "
         "이제는 '제품명으로 진짜 ITEM_SEQ 찾기'를 먼저 테스트하는 걸 권장합니다."
     )
-    test_item_name = st.text_input("테스트할 제품명 (예: 포크랄시럽(포수클로랄))", key="debug_item_name")
+    test_item_name = st.text_input("테스트할 제품명 (예: 포크랄시럽(포수클로랄)_(9.5g/95mL) - 포장단위 붙어있어도 자동 정제됨)", key="debug_item_name")
     test_name_run = st.button("제품명으로 진짜 ITEM_SEQ 찾기", disabled=not service_key)
     if not service_key:
         st.warning("사이드바에 서비스키를 먼저 입력해주세요.")
     if test_name_run and test_item_name.strip():
-        candidates, err = resolve_item_seq(service_key, test_item_name.strip())
+        clean_name, size_hint = clean_product_name(test_item_name.strip())
+        if clean_name != test_item_name.strip():
+            st.caption(f"🧹 검색용으로 정제된 이름: **{clean_name}** (포장단위 '{size_hint}' 분리함)")
+        candidates, err = resolve_item_seq(service_key, clean_name)
         if err:
             st.error(f"목록조회 실패: {err}")
         elif not candidates:
@@ -234,7 +257,7 @@ with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 
             show_cols = [c for c in ["ITEM_SEQ", "ITEM_NAME", "ENTP_NAME", "ITEM_PERMIT_DATE"] if c in candidates[0]]
             st.dataframe(pd.DataFrame(candidates)[show_cols] if show_cols else pd.DataFrame(candidates))
 
-            best = pick_best_match(candidates, test_item_name.strip())
+            best = pick_best_match(candidates, clean_name)
             if best:
                 real_seq = best.get("ITEM_SEQ")
                 st.info(f"가장 유력한 진짜 ITEM_SEQ: **{real_seq}** — 아래에서 바로 상세조회 테스트")
@@ -270,27 +293,33 @@ st.divider()
 # ============================================================
 # 1) Master 엑셀 업로드
 # ============================================================
-master_file = st.file_uploader("Master 엑셀 업로드 (제품명, 품목기준코드/약품코드, 성분명, 함량, 제형, 효능효과, 용법용량 컬럼 필요)", type=["xlsx"])
+master_file = st.file_uploader("Master 엑셀 업로드 (약품명/제품명, 품목기준코드/약품코드, 성분명, 함량, 제형, 효능효과, 용법용량 컬럼 필요)", type=["xlsx"])
 
 if master_file:
     df = pd.read_excel(master_file, sheet_name=0)
     st.write(f"전체 {len(df):,}행 로드 완료")
 
-    name_col = "제품명" if "제품명" in df.columns else None
+    name_col = "약품명" if "약품명" in df.columns else ("제품명" if "제품명" in df.columns else None)
     code_col = "약품코드" if "약품코드" in df.columns else ("품목기준코드" if "품목기준코드" in df.columns else None)
     if name_col is None:
-        st.error("제품명 컬럼을 찾을 수 없습니다. (코드값 불일치가 확인되어 제품명으로 재조회하는 방식이 필요합니다)")
+        st.error("약품명(또는 제품명) 컬럼을 찾을 수 없습니다. (코드값 불일치가 확인되어 이름으로 재조회하는 방식이 필요합니다)")
         st.stop()
 
-    missing_mask = df["효능효과"].isna() & df["용법용량"].isna() if "효능효과" in df.columns else df.index >= 0
+    eff_empty = df["효능효과"].isna() if "효능효과" in df.columns else False
+    use_empty = df["용법용량"].isna() if "용법용량" in df.columns else False
+    missing_mask = eff_empty | use_empty
     missing_df = df[missing_mask].reset_index(drop=True)
-    st.info(f"효능효과/용법용량 둘 다 비어있는 행: {len(missing_df):,}건")
+    st.info(
+        f"효능효과 또는 용법용량이 비어있는 행: {len(missing_df):,}건 "
+        "(용법용량을 못 찾아도 효능효과만이라도 채웁니다)"
+    )
 
     chunk_df = missing_df.iloc[int(start_idx):int(end_idx)]
     st.write(f"이번 청크에서 조회할 품목: {len(chunk_df):,}건 (인덱스 {start_idx}~{end_idx})")
     st.caption(
-        "⚠️ 이 방식은 품목당 API를 최대 2번(① 제품명→ITEM_SEQ 검색, ② 상세조회) 호출합니다. "
-        "속도가 기존보다 2배 느려지니, 청크 크기를 기존의 절반 정도로 잡는 걸 권장합니다."
+        "⚠️ 이 방식은 품목당 API를 최대 2번(① 약품명→ITEM_SEQ 검색, ② 상세조회) 호출합니다. "
+        "속도가 기존보다 2배 느려지니, 청크 크기를 기존의 절반 정도로 잡는 걸 권장합니다. "
+        "약품명 끝에 포장단위(예: '_(9.5g/95mL)')가 붙어있어도 자동으로 떼어내고 검색합니다."
     )
 
     if "filled_results" not in st.session_state:
@@ -309,23 +338,24 @@ if master_file:
         n = len(chunk_df)
         for i, (_, row) in enumerate(chunk_df.iterrows()):
             orig_code = str(row[code_col]).strip() if code_col else str(i)
-            item_name = str(row[name_col]).strip()
-            content_hint = str(row["함량"]).strip() if "함량" in df.columns and pd.notna(row.get("함량")) else ""
+            raw_name = str(row[name_col]).strip()
+            clean_name, size_hint = clean_product_name(raw_name)
+            content_hint = size_hint or (str(row["함량"]).strip() if "함량" in df.columns and pd.notna(row.get("함량")) else "")
 
-            real_seq = st.session_state["name_seq_cache"].get(item_name)
+            real_seq = st.session_state["name_seq_cache"].get(clean_name)
             if real_seq is None:
-                candidates, list_err = resolve_item_seq(service_key, item_name)
+                candidates, list_err = resolve_item_seq(service_key, clean_name)
                 if list_err or not candidates:
-                    errors.append(f"{item_name}: 목록조회 실패/결과없음 ({list_err})")
+                    errors.append(f"{raw_name}: 목록조회 실패/결과없음 ({list_err})")
                     progress.progress((i + 1) / max(n, 1))
                     time.sleep(sleep_sec)
                     continue
-                best = pick_best_match(candidates, item_name, content_hint)
+                best = pick_best_match(candidates, clean_name, content_hint)
                 real_seq = best.get("ITEM_SEQ") if best else None
-                st.session_state["name_seq_cache"][item_name] = real_seq
+                st.session_state["name_seq_cache"][clean_name] = real_seq
 
             if not real_seq:
-                errors.append(f"{item_name}: 진짜 ITEM_SEQ를 못 찾음")
+                errors.append(f"{raw_name}: 진짜 ITEM_SEQ를 못 찾음")
                 progress.progress((i + 1) / max(n, 1))
                 time.sleep(sleep_sec)
                 continue
@@ -335,7 +365,7 @@ if master_file:
                 result["원본코드"] = orig_code
                 st.session_state["filled_results"][orig_code] = result
             else:
-                errors.append(f"{item_name}({real_seq}): {err}")
+                errors.append(f"{raw_name}({real_seq}): {err}")
             progress.progress((i + 1) / max(n, 1))
             status.text(f"{i+1}/{n} 처리 중... (누적 성공 {len(st.session_state['filled_results']):,}건)")
             time.sleep(sleep_sec)
