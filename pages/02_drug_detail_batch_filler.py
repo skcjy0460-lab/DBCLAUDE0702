@@ -126,7 +126,11 @@ TAG_RE = re.compile(r"<[^>]+>")
 def strip_html(text: str) -> str:
     if not text:
         return ""
-    text = TAG_RE.sub(" ", str(text))
+    text = str(text)
+    # CDATA 블록은 내부에 '>'가 없어서 태그 제거 정규식이 통째로 지워버리는 문제가 있었음.
+    # CDATA 내용을 먼저 그대로 꺼낸 뒤에 남은 XML 태그를 제거한다.
+    text = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", text, flags=re.DOTALL)
+    text = TAG_RE.sub(" ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
