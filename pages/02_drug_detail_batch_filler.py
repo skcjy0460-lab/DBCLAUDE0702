@@ -288,7 +288,12 @@ with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 
                         st.json(result)
                     else:
                         st.error(f"실패: {derr}")
-                    st.code(raw_text[:2000] if raw_text else "(응답 본문 없음)")
+                    st.write("**원본 응답 전체 (필드명 확인용):**")
+                    try:
+                        import json as _json
+                        st.json(_json.loads(raw_text))
+                    except Exception:
+                        st.code(raw_text[:3000] if raw_text else "(응답 본문 없음)")
 
     st.divider()
     st.caption("코드값 자체를 직접 넣어 테스트하고 싶으면 아래를 사용하세요.")
@@ -305,8 +310,12 @@ with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 
             st.json(result)
         else:
             st.error(f"실패: {err}")
-        st.write("**원본 응답(raw):**")
-        st.code(raw_text[:2000] if raw_text else "(응답 본문 없음)")
+        st.write("**원본 응답(raw, 필드명 확인용):**")
+        try:
+            import json as _json
+            st.json(_json.loads(raw_text))
+        except Exception:
+            st.code(raw_text[:3000] if raw_text else "(응답 본문 없음)")
 
 st.divider()
 
