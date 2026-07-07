@@ -243,11 +243,26 @@ with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 
     test_name_run = st.button("제품명으로 진짜 ITEM_SEQ 찾기", disabled=not service_key)
     if not service_key:
         st.warning("사이드바에 서비스키를 먼저 입력해주세요.")
+
     if test_name_run and test_item_name.strip():
         clean_name, size_hint = clean_product_name(test_item_name.strip())
-        if clean_name != test_item_name.strip():
-            st.caption(f"🧹 검색용으로 정제된 이름: **{clean_name}** (포장단위 '{size_hint}' 분리함)")
         candidates, err = resolve_item_seq(service_key, clean_name)
+        st.session_state["debug_clean_name"] = clean_name
+        st.session_state["debug_size_hint"] = size_hint
+        st.session_state["debug_candidates"] = candidates
+        st.session_state["debug_list_err"] = err
+        # 새로 검색했으니 이전 상세조회 결과는 초기화
+        st.session_state.pop("debug_detail_result", None)
+
+    if st.session_state.get("debug_candidates") is not None:
+        clean_name = st.session_state.get("debug_clean_name", "")
+        size_hint = st.session_state.get("debug_size_hint", "")
+        candidates = st.session_state["debug_candidates"]
+        err = st.session_state.get("debug_list_err")
+
+        if clean_name and clean_name != test_item_name.strip():
+            st.caption(f"🧹 검색용으로 정제된 이름: **{clean_name}** (포장단위 '{size_hint}' 분리함)")
+
         if err:
             st.error(f"목록조회 실패: {err}")
         elif not candidates:
@@ -260,9 +275,14 @@ with st.expander("🔍 대량 수집 전, 코드 1건 먼저 테스트해보기 
             best = pick_best_match(candidates, clean_name)
             if best:
                 real_seq = best.get("ITEM_SEQ")
-                st.info(f"가장 유력한 진짜 ITEM_SEQ: **{real_seq}** — 아래에서 바로 상세조회 테스트")
-                if st.button(f"이 ITEM_SEQ({real_seq})로 상세조회 테스트"):
+                st.info(f"가장 유력한 진짜 ITEM_SEQ: **{real_seq}** — 아래 버튼으로 바로 상세조회 테스트")
+                detail_test_click = st.button(f"이 ITEM_SEQ({real_seq})로 상세조회 테스트", key="debug_detail_btn")
+                if detail_test_click:
                     result, derr, raw_text, req_url = call_detail_api(service_key, real_seq, return_raw=True)
+                    st.session_state["debug_detail_result"] = (result, derr, raw_text)
+
+                if "debug_detail_result" in st.session_state:
+                    result, derr, raw_text = st.session_state["debug_detail_result"]
                     if result:
                         st.success("성공! 효능효과/용법용량이 반환되었습니다.")
                         st.json(result)
